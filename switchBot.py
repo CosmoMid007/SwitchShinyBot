@@ -44,7 +44,7 @@ nx = nxbt.Nxbt()
 controller_idx = None
 
 #Stream Settings
-RTSP_URL = "RTSP STREAM ADDRESS" #CHANGE THIS
+CAPTURE_DEVICE = /dev/video0
 
 #Frame Reader
 FRAME_WIDTH = 640
@@ -65,103 +65,26 @@ ROLLING_FILE = os.path.join(OUTPUT_DIR, "shinyFound%01d.ts")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 """Frame Reader Stuff"""
-def _read_exactly(pipe, n):
-	"""Read exactly n bytes from pipe, returning bytes or None on EOF."""
-	buf = b""
-	while len(buf) < n:
-		try:
-			chunk = pipe.read(n - len(buf))
-		except (ValueError, OSError):
-			return None
-		if not chunk:
-			return None
-		buf += chunk
-	return buf
+latest_frame = None
+_frame_lock = threading.Lock()
 
-def _frame_reader(process: subprocess.Popen):
-	global latest_frame, _reader_running
-	frame_size = FRAME_WIDTH * FRAME_HEIGHT * 3
-	print(f"[reader] started, expecting {frame_size} bytes per frame")
-	frames_read = 0
-	while _reader_running:
-		raw = _read_exactly(process.stdout, frame_size)
-		if raw is None:
-			print(f"[reader] EOF after {frames_read} frames")
-			break
-		frames_read += 1
-		frame = np.frombuffer(raw, np.uint8).reshape((FRAME_HEIGHT, FRAME_WIDTH, 3))
-		with _frame_lock:
-			latest_frame = frame
-	print(f"[reader] thread exiting")
+def _frame_reader():
+    global latest_frame
+    cap = cv2.VideoCapture(CAPTURE_DEVICE)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+    cap.set(cv2.CAP_PROP_FPS, PREVIEW_FPS)
 
-def StartCapture():
-	"""Start one FFmpeg process that feeds both the rolling buffer and the frame reader."""
-	global _process, _reader_thread, _reader_running, _log_file
-	with _start_lock:
-		if _process and _process.poll() is None:
-			return  # Already running
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        with _frame_lock:
+            latest_frame = frame
 
-		command = [
-			"ffmpeg",
-			"-rtsp_transport", "tcp",
-			"-fflags", "nobuffer+discardcorrupt",
-			"-flags", "low_delay",
-			"-reorder_queue_size", "0",
-			"-buffer_size", "1024000",
-			"-i", RTSP_URL,
-			# Rolling buffer — direct stream copy, no filter
-			"-map", "0:v",
-			"-c:v", "copy",
-			"-an",
-			"-f", "segment",
-			"-segment_time", "3",
-			"-segment_wrap", "5",
-			"-reset_timestamps", "1",
-			"-y", ROLLING_FILE,
-			# Preview — scaled + fps limited, raw pipe
-			"-map", "0:v",
-			"-vf", f"scale={FRAME_WIDTH}:{FRAME_HEIGHT},fps={PREVIEW_FPS}",
-			"-c:v", "rawvideo",
-			"-pix_fmt", "bgr24",
-			"-an",
-			"-f", "rawvideo",
-			"pipe:1",
-		]
-
-		_log_file = open("ffmpeg.log", "w")
-		_process = subprocess.Popen(
-			command,
-			stdout=subprocess.PIPE,
-			stderr=_log_file,
-			stdin=subprocess.DEVNULL,
-			bufsize=0,
-		)
-
-		_reader_running = True
-		_reader_thread = threading.Thread(target=_frame_reader, args=(_process,), daemon=True)
-		_reader_thread.start()
-
-def StopCapture():
-	global _reader_running, _process, _reader_thread, _log_file
-	print("Stopping capture")
-	_reader_running = False
-
-	if _process:
-		_process.terminate()
-		try:
-			_process.wait(timeout=3)
-		except subprocess.TimeoutExpired:
-			_process.kill()
-			_process.wait()
-		_process = None
-
-	if _reader_thread:
-		_reader_thread.join(timeout=3)
-		_reader_thread = None
-
-	if _log_file:
-		_log_file.close()
-		_log_file = None
+def CaptureFrame():
+    with _frame_lock:
+        return latest_frame.copy() if latest_frame is not None else None
 
 def CaptureFrame():
 	with _frame_lock:
