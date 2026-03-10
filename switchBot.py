@@ -44,7 +44,7 @@ nx = nxbt.Nxbt()
 controller_idx = None
 
 #Stream Settings
-RTSP_URL = "RTSP STREAM ADDRESS" #CHANGE THIS
+RTSP_URL = "rtsp://localhost/live:554/live" #CHANGE THIS
 
 #Frame Reader
 FRAME_WIDTH = 640
